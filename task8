@@ -1,0 +1,63 @@
+ESC1 — AD CS Misconfiguration
+
+Что увидели:
+- Enrollee Supplies Subject : True
+- Extended Key Usage : Client Authentication
+- Enrollment Rights : Authenticated Users
+- Requires Manager Approval : False
+
+---
+
+Уязвимость: ESC1
+
+Почему уязвимо
+
+Любой пользователь домена может:
+- запросить сертификат;
+- самостоятельно указать subject/SAN;
+- получить сертификат от имени другого пользователя.
+
+При этом:
+- шаблон разрешает Client Authentication;
+- enrollment доступен всем Authenticated Users;
+- approval отсутствует.
+
+---
+
+Максимальный риск
+
+Domain Admin Takeover
+
+Можно выпустить сертификат:
+- для Administrator;
+- любого DA;
+- service account.
+
+Далее:
+- получить TGT через PKINIT;
+- аутентифицироваться как DA;
+- полный takeover домена.
+
+---
+
+Почему это ESC1
+
+Классический ESC1:
+- Enrollee Supplies Subject = True
+- EKU = Client Authentication
+- enrollment доступен low-priv пользователям.
+
+---
+
+Эксплуатация
+
+Запрос сертификата от имени Administrator
+
+```bash
+certipy req \
+-u user@pentest.local \
+-p 'Password123!' \
+-ca Antique_CA \
+-template ForClient \
+-upn administrator@pentest.local \
+-target ca.pentest.local
